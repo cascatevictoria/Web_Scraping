@@ -1,0 +1,295 @@
+---
+title: "Web Scraping: Movies"
+author: "Victoria Bolotova"
+date: "11 10 2022"
+output: 
+    html_document:
+      theme: cosmo
+      code_folding: show
+      toc: true
+      toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# 1. Introduction & Web Scraping
+
+In this project I am going to analyse the data about best movies from website metacritic (https://www.metacritic.com/browse/movies/score/metascore/all/filtered?sort=desc). The goal of the project is to scrap different interesting characteristics of the movies such as year of release, director, distributor, runtime, country, and metascore. Then to run simple EDA to understand data better and, finally, I would like to study what factors influence runtime of the movies.
+
+
+## Data from initial page 
+
+```{r}
+library(rvest)
+library(dplyr)
+
+url <- "https://www.metacritic.com/browse/movies/genre/metascore/thriller?view=detailed"
+page <- read_html(url)
+
+title <- page %>%
+  html_nodes(".title h3") %>%
+  html_text() 
+
+metascore <- page %>%
+  html_nodes(".clamp-score-wrap .positive") %>%
+  html_text()
+
+date <- page %>%
+  html_nodes(".clamp-details span:nth-child(1)")%>%
+  html_text()
+```
+
+## Data from nested links
+
+Now I need data that I can get only from nested links. 
+
+First I need a machine to scrap nested links for all movies by the following code:
+
+### Scrap nested links
+
+```{r}
+movie_links <- page %>%
+  html_nodes("a.title") %>%
+  html_attr("href") %>%
+  paste("https://www.metacritic.com", ., sep="")
+```
+
+Second I need a function that finds distributors for each movie:
+
+### Distributor
+
+```{r}
+get_distributor <- function(distributor) {
+  movie_page <- read_html(distributor)
+  movie_distributor <- movie_page %>% 
+    html_nodes(".distributor a") %>% 
+    html_text()
+  return(movie_distributor)
+}
+```
+
+Now I need to apply this function to all nested links:
+
+```{r}
+distributor <- sapply(movie_links, FUN = get_distributor)
+```
+
+### Director
+
+The same procedure to get directors for each movie:
+
+```{r}
+get_director <- function(director) {
+  movie_page <- read_html(director)
+  movie_director <- movie_page %>% 
+    html_nodes(".director a span") %>% 
+    html_text() %>% paste(collapse = ",")
+  return(movie_director) 
+}
+```
+
+Now I need to apply this function to all nested links:
+
+```{r}
+director <- sapply(movie_links, FUN = get_director)
+```
+
+### Country
+
+However, even in nested links not all information is available, because there is an additional button "See All Details and Credits". When I click on it, the text "details" is added to the nested link. 
+
+For example: **https://www.metacritic.com/movie/the-godfather** -> **https://www.metacritic.com/movie/the-godfather/details** 
+
+And this text is added to all films. Thus, I can just add the text "/details" to all links that were previously scraped and get new variables:
+
+```{r}
+get_country <- function(link) {
+  details_link <- paste(link, "/details", sep="")
+  details_page <- read_html(details_link)
+  country <- details_page %>% 
+    html_nodes(".countries span") %>% 
+    html_text() %>% paste(collapse = ",")
+  return(country)
+}
+
+country <- sapply(movie_links, FUN=get_country)
+```
+
+### Runtime
+
+```{r}
+get_runtime <- function(runtime) {
+  movie_page <- read_html(runtime)
+  movie_runtime <- movie_page %>% 
+    html_nodes(".runtime .label+ span") %>% 
+    html_text()
+  return(movie_runtime)
+}
+```
+
+Now I need to apply this function to all nested links:
+
+```{r}
+runtime <- sapply(movie_links, FUN = get_runtime)
+```
+
+Create dataframe with all scraped variables:
+
+```{r}
+movies_df <- data_frame(title, date, metascore, distributor, director, country, runtime)
+```
+
+# 2. Data preprocessing
+
+```{r}
+glimpse(movies_df)
+```
+
+Everything looks good, except for date and runtime. I need only years and runtime without minutes for analysis, not full date. 
+
+Let's extract years from date and save them into new column:
+
+```{r}
+movies_df$year <- sub(".*,", "", movies_df$date)
+```
+
+Let's extract years from date and save them into new column:
+
+```{r}
+movies_df$time <- sub("min", "", movies_df$runtime)
+```
+
+However, there is also a small problem with `country` variables, because some movies actually contains several countries.
+
+```{r}
+movies_df$country_1 <- sub(",.*", "", movies_df$country)
+```
+
+The same problem with `director` variable.
+
+```{r}
+movies_df$director_1 <- sub(",.*", "", movies_df$director)
+```
+
+```{r}
+movies_df <- movies_df %>%
+  select(- runtime, - date, - director, - country)
+```
+
+
+Also, there is an another problem with `country` variable, because the same countries are written differently (e.g., US and USA)
+
+```{r}
+movies_df <- movies_df %>%
+    mutate(country_1 = recode(country_1, 
+  "US" = "USA", 
+  "GB" = "UK",
+  "DE" = "Germany", 
+  "JP" = "Japan", 
+  "Hong Kong" = "China"))
+```
+
+
+## Transformation of variables into correct type
+
+### Numeric variables
+
+```{r}
+movies_df$metascore <- as.numeric(movies_df$metascore)
+movies_df$year <- as.numeric(movies_df$year)
+movies_df$time <- as.numeric(movies_df$time)
+```
+
+### Factor variables
+
+```{r}
+movies_df$country_1 <- as.factor(movies_df$country_1)
+movies_df$distributor <- as.factor(movies_df$distributor)
+```
+
+Now data is clean, correct and ready for analysis. 
+
+```{r}
+glimpse(movies_df)
+```
+
+# 3. Exploratory data analysis
+
+## Basic statistics 
+
+```{r}
+var_names <- movies_df %>%
+  rename(`Year of release` = year,
+         `Runtime of movie` = time, 
+         `Metascore` = metascore, 
+         `Country` = country_1, 
+         `Distributor` = distributor)
+         
+         
+var_names <- var_names %>%
+  select(- title, - director_1)
+
+caption_1 <- "Table 1. Sample descriptive statistics for continious variables"
+
+library(modelsummary)
+datasummary_skim(var_names, title = caption_1)
+```
+
+```{r}
+caption_2 <- "Table 2. Sample descriptive statistics for categorical variables"
+datasummary_skim(var_names, type = "categorical", title = caption_2)
+```
+
+## Visualization with plotly
+
+
+```{r}
+library(plotly)
+plot_ly(movies_df, x =~time, y=~metascore,  type = 'scatter', mode = 'markers') %>%
+   layout(title = 'Correlation between time and metascore',
+         xaxis = list(title = 'Runtime'),
+         yaxis = list(title = 'Metascore')) 
+```
+
+```{r}
+plot_ly(movies_df, x =~year, y=~metascore,  type = 'scatter', mode = 'markers') %>%
+   layout(title = 'Correlation between year of release and metascore',
+         xaxis = list(title = 'Year'),
+         yaxis = list(title = 'Metascore'))
+```
+
+
+# 4. Linear regression
+
+**What factors influence runtime of the movies?**
+
+To be able to use categorical variable `country`, I need to decrease the number of categories there. I decided to create binary variable, that reflects whether the country of the film USA or not.
+
+```{r}
+movies_df_2 <- movies_df %>%
+  mutate(country_binary = ifelse(country_1 %in% c('USA'), 'USA', 'not_USA'))
+```
+
+```{r}
+library(sjPlot)
+
+labs = c("Constant", "Year of release", 
+         "Meta score",
+         "Country (USA)")
+
+model <- lm(time ~ year + metascore + country_binary, data = movies_df_2)
+
+
+tab_model(model, pred.labels = labs, title = "Table 1. Linear regression: Factors that influence runtime of the best movies of all times",
+          dv.labels = "Runtime")
+```
+
+
+* Every one unit increase in year of release leads to 0.4 increase in runtime of movies on average, holding everything else constant (p-value = 0.001).
+
+* Other variables are not statistically significant at explaining runtime of the movies.
+
+* Adjusted R-squared equals to 0.115, it means that only 12% of variance in runtime of movies can be explained by the model. Thus, I can conclude that the explanatory power is not good enough. 
+
